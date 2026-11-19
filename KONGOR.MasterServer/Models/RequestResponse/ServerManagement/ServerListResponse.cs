@@ -1,3 +1,8 @@
+
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
+
 namespace KONGOR.MasterServer.Models.RequestResponse.ServerManagement;
 
 public class ServerForCreateListResponse(List<MatchServer> servers, string? region, string cookie) : ServerListResponse(cookie)
@@ -75,11 +80,58 @@ public abstract class ServerForResponse(string id, string ip, string port, strin
     public string ID { get; set; } = id;
 
     [PHPProperty("ip")]
-    public string IPAddress { get; set; } = ip;
+    public string IPAddress { get; set; } = GetAdvertisedIPAddress(ip);
 
     [PHPProperty("port")]
     public string Port { get; set; } = port;
 
     [PHPProperty("location")]
     public string Location { get; set; } = location;
+
+    private static string GetAdvertisedIPAddress(string ip)
+    {
+        if (!System.Net.IPAddress.TryParse(ip, out System.Net.IPAddress? address) ||
+            !System.Net.IPAddress.IsLoopback(address))
+            return ip;
+
+        try
+        {
+            using Socket socket = new(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+
+            socket.Connect("8.8.8.8", 53);
+
+            return ((IPEndPoint)socket.LocalEndPoint!).Address.ToString();
+        }
+        catch (SocketException)
+        {
+            List<System.Net.IPAddress> addresses = NetworkInterface.GetAllNetworkInterfaces()
+                .Where(networkInterface =>
+                    networkInterface.OperationalStatus == OperationalStatus.Up &&
+                    networkInterface.NetworkInterfaceType is NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211)
+                .SelectMany(networkInterface => networkInterface.GetIPProperties().UnicastAddresses)
+                .Select(unicastAddress => unicastAddress.Address)
+                .Where(IsPrivateIPv4)
+                .Distinct()
+                .ToList();
+
+            return addresses.Count switch
+            {
+                1 => addresses[0].ToString(),
+                0 => throw new InvalidOperationException("Could not determine a LAN IPv4 address for the match server."),
+                _ => throw new InvalidOperationException($"Multiple LAN IPv4 addresses found: {string.Join(", ", addresses)}. Configure an explicit advertised IP address.")
+            };
+        }
+    }
+
+    private static bool IsPrivateIPv4(System.Net.IPAddress address)
+    {
+        if (address.AddressFamily != AddressFamily.InterNetwork)
+            return false;
+
+        byte[] bytes = address.GetAddressBytes();
+
+        return bytes[0] == 10 ||
+               bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31 ||
+               bytes[0] == 192 && bytes[1] == 168;
+    }
 }
